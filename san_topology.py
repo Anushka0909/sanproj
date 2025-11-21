@@ -13,7 +13,6 @@ class SANTopology:
         self.switches = [f"Sw{i}" for i in range(1, 6)]
 
         # Adjacency list (undirected)
-        # Exactly as Figure 1 in the paper
         # Server-to-switch
         # Sr1: [Sw1, Sw2]
         # Sr2: [Sw4, Sw5]
@@ -27,27 +26,24 @@ class SANTopology:
         # Sw4: [Sw1, Sw2, Sw5, Sw3]
         # Sw5: [Sw1, Sw2, Sw3, Sw4]
         self.adj = {
-            "Sr1": ["Sw1", "Sw2"],
-            "Sr2": ["Sw4", "Sw5"],
-            "Sa1": ["Sw1", "Sw2", "Sw4"],
-            "Sa2": ["Sw3", "Sw5"],
-            "Sw1": ["Sr1", "Sw2", "Sw4", "Sw5"],
-            "Sw2": ["Sr1", "Sw1", "Sw4", "Sw5", "Sw3"],
-            "Sw3": ["Sa2", "Sw2", "Sw5", "Sw4"],
-            "Sw4": ["Sr2", "Sa1", "Sw1", "Sw2", "Sw5", "Sw3"],
-            "Sw5": ["Sr2", "Sa2", "Sw1", "Sw2", "Sw3", "Sw4"],
+            "Sr1": ["Sw4", "Sw5"],
+            "Sr2": ["Sw3", "Sw5"],
+            "Sa1": ["Sw1", "Sw2"],
+            "Sa2": ["Sw2", "Sw3"],
+            "Sw1": ["Sa1", "Sw2", "Sw4", "Sw5"],
+            "Sw2": ["Sa1", "Sa2", "Sw1", "Sw3", "Sw4", "Sw5"],
+            "Sw3": ["Sr2", "Sa2", "Sw2", "Sw4", "Sw5"],
+            "Sw4": ["Sr1", "Sw1", "Sw2", "Sw3", "Sw5"],
+            "Sw5": ["Sr2", "Sw1", "Sw2", "Sw3", "Sw4"],
         }
 
-        # Validate degrees: only count switch-to-switch and server/storage links as in figure
-        # Count degree of switches as number of switch neighbors shown in Figure 1
-        # Degrees overridden to match paper specification (switch-only degrees)
-        # Note: these are the degree values used in Π computation (per user's instruction)
+        # Validate degrees: only count switch-to-switch
         self.degrees = {
-            "Sw1": 1,
+            "Sw1": 3,
             "Sw2": 4,
-            "Sw3": 1,
-            "Sw4": 1,
-            "Sw5": 1,
+            "Sw3": 3,
+            "Sw4": 4,
+            "Sw5": 4,
         }
 
         # Initial loads L0 and base failure rates lambda (from Table 2)
@@ -58,7 +54,7 @@ class SANTopology:
         # Sw5: λ=3.5e-6,  L0=8
         self.L0 = {
             "Sw1": 15.0,
-            "Sw2": 0.0,
+            "Sw2": 50.0,
             "Sw3": 5.0,
             "Sw4": 1.0,
             "Sw5": 8.0,
