@@ -26,14 +26,6 @@ class ComponentType(Enum):
     SAN = "Storage Area Network"
 
 
-class LoadBalancingStrategy(Enum):
-    """Load balancing strategies."""
-    ROUND_ROBIN = "Round Robin"
-    LEAST_CONNECTIONS = "Least Connections"
-    WEIGHTED_ROUND_ROBIN = "Weighted Round Robin"
-    IP_HASH = "IP Hash"
-
-
 class LoadDistributionStrategy(Enum):
     """Load distribution strategies for threshold-based redistribution."""
     NONE = "None"
@@ -41,6 +33,8 @@ class LoadDistributionStrategy(Enum):
     STATIC_THRESHOLD_LOAD_SENSITIVE = "Static Threshold (Load-Sensitive)"
     DYNAMIC_THRESHOLD_RELIABILITY_SENSITIVE = "Dynamic Threshold (Reliability-Sensitive)"
     DYNAMIC_THRESHOLD_LOAD_SENSITIVE = "Dynamic Threshold (Load-Sensitive)"
+    ENERGY_AWARE_OPTIMIZATION = "Energy-Aware Optimization"
+    LATENCY_AWARE = "Latency-Aware Redistribution"
 
 
 @dataclass
@@ -149,6 +143,9 @@ class NetworkComponent:
         self.storage_available = 1000  # GB for SAN
         self.storage_used = 0.0  # GB
         self.connection_stats: Dict[str, ConnectionStats] = {}
+        # Energy-aware fields
+        self.power_consumption = 0.0  # Watts
+        self.sleep_mode = False  # Can be put to sleep if load < 10
     
     def connect_to(self, target_id: str):
         """Create connection to another component."""
@@ -163,6 +160,18 @@ class NetworkComponent:
     def get_load_percentage(self) -> float:
         """Get current load as percentage of capacity."""
         return (self.current_load / self.bandwidth_capacity) * 100 if self.bandwidth_capacity > 0 else 0
+    
+    def calculate_power_consumption(self) -> float:
+        """Calculate power consumption based on load.
+        
+        Formula: power = 50W (base) + (load / 100) * 150W (load-proportional)
+        If sleep_mode: power = 0W (but unavailable)
+        """
+        if self.sleep_mode or not self.active:
+            return 0.0
+        # Base 50W + up to 150W proportional to load
+        self.power_consumption = 50.0 + (self.current_load / 100.0) * 150.0
+        return self.power_consumption
     
     def simulate_traffic(self, traffic: TrafficData):
         """Process incoming traffic."""
@@ -207,50 +216,6 @@ class NetworkComponent:
             'base_lambda': self.base_lambda,
             'alpha': self.alpha,
         }
-
-
-class LoadBalancer:
-    """Handles load balancing across components."""
-    
-    def __init__(self, strategy: LoadBalancingStrategy = LoadBalancingStrategy.ROUND_ROBIN):
-        self.strategy = strategy
-        self.round_robin_index = 0
-        self.weights: Dict[str, float] = {}
-    
-    def select_destination(self, available_destinations: List[Tuple[str, float]]) -> str:
-        """Select destination based on load balancing strategy."""
-        if not available_destinations:
-            return None
-        
-        if self.strategy == LoadBalancingStrategy.ROUND_ROBIN:
-            dest = available_destinations[self.round_robin_index % len(available_destinations)][0]
-            self.round_robin_index += 1
-            return dest
-        
-        elif self.strategy == LoadBalancingStrategy.LEAST_CONNECTIONS:
-            return min(available_destinations, key=lambda x: x[1])[0]
-        
-        elif self.strategy == LoadBalancingStrategy.WEIGHTED_ROUND_ROBIN:
-            total_weight = sum(w for _, w in available_destinations)
-            choice = random.uniform(0, total_weight)
-            current = 0
-            for dest_id, weight in available_destinations:
-                current += weight
-                if choice <= current:
-                    return dest_id
-            return available_destinations[-1][0]
-        
-        elif self.strategy == LoadBalancingStrategy.IP_HASH:
-            # Simulate IP hash by using a consistent random selection
-            return available_destinations[hash(str(available_destinations)) % len(available_destinations)][0]
-        
-        return available_destinations[0][0]
-    
-    def set_weight(self, component_id: str, weight: float):
-        """Set weight for weighted load balancing."""
-        self.weights[component_id] = weight
-
-
 # ==================== GRAPHICS COMPONENTS ====================
 class GraphicsNetworkComponent(QGraphicsItem):
     """Graphics representation of a network component."""
@@ -311,7 +276,11 @@ class GraphicsNetworkComponent(QGraphicsItem):
         painter.setPen(QPen(QColor(255, 255, 255), 1))
         font = QFont("Arial", 8, QFont.Weight.Bold)
         painter.setFont(font)
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.component.id.split('_')[0])
+        label_text = self.component.id
+        if self.component.type == ComponentType.SWITCH:
+            parts = self.component.id.split('_')
+            label_text = parts[-1] if parts and parts[-1].isdigit() else self.component.id
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label_text)
     
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
@@ -331,11 +300,12 @@ class GraphicsNetworkComponent(QGraphicsItem):
 class GraphicsConnection(QGraphicsLineItem):
     """Graphics representation of a connection between components."""
     
-    def __init__(self, source_item: GraphicsNetworkComponent, dest_item: GraphicsNetworkComponent):
+    def __init__(self, source_item: GraphicsNetworkComponent, dest_item: GraphicsNetworkComponent, latency_factor: float = 0.02):
         super().__init__()
         self.source_item = source_item
         self.dest_item = dest_item
         self.traffic_flow = 0.0
+        self.latency_factor = latency_factor
         self.update_line()
         self.setPen(QPen(QColor(100, 100, 100), 2))
         self.setZValue(0)
@@ -374,6 +344,27 @@ class GraphicsConnection(QGraphicsLineItem):
         polygon = QPolygonF([self.line().p2(), arrow_p1, arrow_p2])
         painter.drawPolygon(polygon)
 
+        # Draw latency label at midpoint
+        midpoint = self.line().pointAt(0.5)
+        latency_ms = math.hypot(
+            self.source_item.component.x - self.dest_item.component.x,
+            self.source_item.component.y - self.dest_item.component.y
+        ) * self.latency_factor
+        latency_text = f"{latency_ms:.1f} ms"
+        text_rect_width = painter.fontMetrics().horizontalAdvance(latency_text) + 4
+        text_rect_height = painter.fontMetrics().height()
+        text_rect = QRectF(
+            midpoint.x() - text_rect_width / 2,
+            midpoint.y() - text_rect_height / 2,
+            text_rect_width,
+            text_rect_height
+        )
+        painter.setBrush(QBrush(QColor(0, 0, 0, 150)))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(text_rect, 3, 3)
+        painter.setPen(QPen(QColor(255, 255, 255)))
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, latency_text)
+
 
 # ==================== MAIN APPLICATION ====================
 class NetworkSimulator(QMainWindow):
@@ -388,7 +379,6 @@ class NetworkSimulator(QMainWindow):
         self.components: Dict[str, NetworkComponent] = {}
         self.graphics_items: Dict[str, GraphicsNetworkComponent] = {}
         self.connections_graphics: List[GraphicsConnection] = []
-        self.load_balancer = LoadBalancer(LoadBalancingStrategy.ROUND_ROBIN)
         self.simulation_running = False
         self.simulation_paused = False
         self.simulation_time = 0
@@ -400,9 +390,12 @@ class NetworkSimulator(QMainWindow):
         self.load_distribution_strategy = LoadDistributionStrategy.NONE
         self.load_threshold = 50.0
         self.top_k = 1  # Number of switches to select for redistribution
+        self.latency_neighbor_limit = 3  # Max neighbors considered per switch for latency-aware redistribution
+        self.latency_conversion_factor = 0.02  # ms per canvas unit distance (tunable latency scaling)
         
         # Logging for graph generation
         self.load_history = {}  # {switch_id: [(timestamp, load), ...]}
+        self.power_history = {}  # {switch_id: [(timestamp, power), ...]} for energy-aware tracking
         self.redistribution_log = []  # [(timestamp, event_description), ...]
         self.log_counter = 0  # Counter to log every 5 seconds (10 ticks of 500ms)
         
@@ -466,14 +459,6 @@ class NetworkSimulator(QMainWindow):
         btn_disconnect.clicked.connect(self.remove_connection)
         control_layout.addWidget(btn_disconnect)
         
-        control_layout.addWidget(QLabel("<b>Load Balancing</b>"))
-        
-        self.lb_strategy = QComboBox()
-        self.lb_strategy.addItems([s.value for s in LoadBalancingStrategy])
-        self.lb_strategy.currentTextChanged.connect(self.update_load_balancing_strategy)
-        control_layout.addWidget(QLabel("Strategy:"))
-        control_layout.addWidget(self.lb_strategy)
-        
         control_layout.addWidget(QLabel("<b>Load Distribution</b>"))
         
         self.load_dist_strategy = QComboBox()
@@ -523,20 +508,28 @@ class NetworkSimulator(QMainWindow):
         btn_clear = QPushButton("Clear All")
         btn_clear.clicked.connect(self.clear_all)
         control_layout.addWidget(btn_clear)
+
+        btn_reset_loads = QPushButton("Reset Switch Loads")
+        btn_reset_loads.clicked.connect(self.reset_switch_loads)
+        control_layout.addWidget(btn_reset_loads)
         
         # Statistics tab - Switches only
         # Stats table will be added as dock widget
         self.stats_table = QTableWidget()
-        self.stats_table.setColumnCount(7)
-        self.stats_table.setHorizontalHeaderLabels(["Switch", "Load", "Req/s", "Reliability", "Lambda", "Alpha", "Op.Time"])
+        self.stats_table.setColumnCount(8)
+        self.stats_table.setHorizontalHeaderLabels(["Switch", "Load", "Power (W)", "Req/s", "Reliability", "Lambda", "Alpha", "Op.Time"])
         header = self.stats_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.stats_table.cellChanged.connect(self.on_stats_cell_changed)
         
         # Graph button
-        btn_graph = QPushButton("Generate Graph")
-        btn_graph.clicked.connect(self.generate_graph)
+        btn_graph = QPushButton("Generate Load Graph")
+        btn_graph.clicked.connect(lambda: self.generate_graph(graph_type='load'))
+        
+        btn_power_graph = QPushButton("Generate Power Graph")
+        btn_power_graph.clicked.connect(lambda: self.generate_graph(graph_type='power'))
         control_layout.addWidget(btn_graph)
+        control_layout.addWidget(btn_power_graph)
         
         # Save/Load
         control_layout.addWidget(QLabel("<b>Project</b>"))
@@ -584,6 +577,10 @@ class NetworkSimulator(QMainWindow):
                 self.load_history[component.id] = []
                 # Add initial data point with current time
                 self.load_history[component.id].append((self.simulation_time, component.current_load))
+            if component.id not in self.power_history:
+                self.power_history[component.id] = []
+                # Add initial power data point
+                self.power_history[component.id].append((self.simulation_time, component.power_consumption))
         
         # Recalculate switch loads and update stats
         # If simulation is running, preserve cumulative request load
@@ -610,7 +607,7 @@ class NetworkSimulator(QMainWindow):
         dest.connect_to(source.id)
         
         # Create graphics connection
-        conn = GraphicsConnection(selected_items[0], selected_items[1])
+        conn = GraphicsConnection(selected_items[0], selected_items[1], self.latency_conversion_factor)
         self.connections_graphics.append(conn)
         self.scene.addItem(conn)
         
@@ -666,13 +663,6 @@ class NetworkSimulator(QMainWindow):
         
         self.scene.update()
     
-    def update_load_balancing_strategy(self, strategy_name: str):
-        """Update load balancing strategy."""
-        for strategy in LoadBalancingStrategy:
-            if strategy.value == strategy_name:
-                self.load_balancer.strategy = strategy
-                break
-    
     def update_load_distribution_strategy(self, index: int):
         """Update load distribution strategy."""
         strategies = list(LoadDistributionStrategy)
@@ -695,6 +685,13 @@ class NetworkSimulator(QMainWindow):
         self.top_k = value
         print(f"[DEBUG] Top K switches updated to: {value}")
     
+    def calculate_latency_ms(self, switch_a: NetworkComponent, switch_b: NetworkComponent) -> float:
+        """Estimate latency between two switches based on their positions."""
+        dx = switch_a.x - switch_b.x
+        dy = switch_a.y - switch_b.y
+        distance = math.hypot(dx, dy)
+        return distance * self.latency_conversion_factor
+
     def calculate_switch_loads(self, include_requests=False):
         """Calculate load for all switches based on connections and incoming requests.
         
@@ -761,16 +758,19 @@ class NetworkSimulator(QMainWindow):
         
         # Initialize logging
         self.load_history = {}
+        self.power_history = {}  # Initialize power history for energy-aware tracking
         self.redistribution_log = []
         switches = [c for c in self.components.values() if c.type == ComponentType.SWITCH]
         for switch in switches:
             self.load_history[switch.id] = []
+            self.power_history[switch.id] = []  # Initialize power history
         
         self.calculate_switch_loads(include_requests=True)  # Start including request load
         
         # Log initial state
         for switch in switches:
             self.load_history[switch.id].append((self.simulation_time, switch.current_load))
+            self.power_history[switch.id].append((self.simulation_time, switch.power_consumption))  # Log initial power
         
         self.update_statistics()  # Show initial stats
         self.sim_timer.start(500)  # Update every 500ms
@@ -792,6 +792,47 @@ class NetworkSimulator(QMainWindow):
         self.reduction_spinbox.setEnabled(True)
         self.load_dist_strategy.setEnabled(True)
     
+    def reset_switch_loads(self):
+        """Reset current load and cumulative request load for all switches."""
+        switches = [c for c in self.components.values() if c.type == ComponentType.SWITCH]
+
+        if not switches:
+            QMessageBox.information(self, "Reset Loads", "No switches to reset.")
+            return
+
+        for switch in switches:
+            switch.cumulative_request_load = 0.0
+            switch.current_load = 0.0
+            switch.over_threshold = False
+            switch.sleep_mode = False
+            switch.reliability = reliability_R(
+                switch.operational_time,
+                0.0,
+                switch.base_lambda,
+                switch.alpha
+            )
+            switch.calculate_power_consumption()
+
+        # Recompute loads to include any static baseline contribution
+        self.calculate_switch_loads(include_requests=self.simulation_running)
+
+        # Update power and histories after recalculation
+        for switch in switches:
+            switch.calculate_power_consumption()
+            if switch.id in self.load_history:
+                self.load_history[switch.id].append((self.simulation_time, switch.current_load))
+            if switch.id in self.power_history:
+                self.power_history[switch.id].append((self.simulation_time, switch.power_consumption))
+
+        self.update_statistics()
+
+        self.redistribution_log.append((
+            self.simulation_time,
+            "Manual reset: all switch loads cleared"
+        ))
+
+        QMessageBox.information(self, "Reset Loads", "Switch loads have been reset.")
+
     def run_simulation_step(self):
         """Execute one simulation step."""
         self.simulation_time += 1
@@ -834,6 +875,10 @@ class NetworkSimulator(QMainWindow):
                 self.apply_dynamic_threshold_reliability_sensitive_redistribution()
             elif self.load_distribution_strategy == LoadDistributionStrategy.DYNAMIC_THRESHOLD_LOAD_SENSITIVE:
                 self.apply_dynamic_threshold_load_sensitive_redistribution()
+            elif self.load_distribution_strategy == LoadDistributionStrategy.ENERGY_AWARE_OPTIMIZATION:
+                self.apply_energy_aware_redistribution()
+            elif self.load_distribution_strategy == LoadDistributionStrategy.LATENCY_AWARE:
+                self.apply_latency_aware_redistribution()
         
         # Update graphics and stats
         self.scene.update()
@@ -1294,6 +1339,312 @@ class NetworkSimulator(QMainWindow):
             self.simulation_paused = True
             self.show_failure_dialog(switches_still_over)
     
+    def apply_latency_aware_redistribution(self):
+        """Apply latency-aware load redistribution prioritizing low-latency neighbors."""
+        switches = [c for c in self.components.values() if c.type == ComponentType.SWITCH]
+
+        # Identify switches that breach the threshold
+        switches_over = [s for s in switches if s.current_load >= self.load_threshold]
+
+        if not switches_over:
+            for s in switches:
+                s.over_threshold = False
+            return
+
+        # Build neighbor map limited to switch-to-switch links
+        neighbors_map = {}
+        for switch in switches:
+            neighbors_map[switch.id] = [neighbor_id for neighbor_id in switch.connections
+                                        if self.components.get(neighbor_id) and
+                                        self.components[neighbor_id].type == ComponentType.SWITCH]
+
+        # Pre-compute latency ordering for each switch
+        latency_map: Dict[str, List[Tuple[str, float]]] = {}
+        for switch in switches:
+            latencies = []
+            for neighbor_id in neighbors_map[switch.id]:
+                neighbor = self.components.get(neighbor_id)
+                if neighbor:
+                    latency_ms = self.calculate_latency_ms(switch, neighbor)
+                    latencies.append((neighbor_id, latency_ms))
+            latencies.sort(key=lambda item: item[1])
+            latency_map[switch.id] = latencies
+
+        # Build latency-aware neighbor map (limit to closest neighbors)
+        latency_neighbors_map: Dict[str, List[str]] = {}
+        for switch in switches:
+            best_neighbors = [neighbor_id for neighbor_id, _ in latency_map[switch.id][:self.latency_neighbor_limit]]
+            latency_neighbors_map[switch.id] = best_neighbors
+
+        degrees = {s.id: len(latency_neighbors_map[s.id]) for s in switches}
+
+        if not any(degrees[s.id] > 0 for s in switches_over):
+            for s in switches_over:
+                s.over_threshold = True
+            self.simulation_paused = True
+            self.show_failure_dialog(switches_over)
+            return
+
+        iteration = 0
+        max_iterations = 4
+        last_selected_sources: List[str] = []
+        last_latency_summary: List[Tuple[str, str, float]] = []
+
+        def average_latency_for_switch(switch: NetworkComponent) -> float:
+            lat_list = [lat for _, lat in latency_map.get(switch.id, [])[:max(1, self.latency_neighbor_limit)]]
+            return sum(lat_list) / len(lat_list) if lat_list else float('inf')
+
+        while iteration < max_iterations:
+            iteration += 1
+
+            switches_over = [s for s in switches if s.current_load >= self.load_threshold]
+
+            if not switches_over:
+                for s in switches:
+                    s.over_threshold = False
+                if last_selected_sources:
+                    avg_latency = (sum(lat for _, _, lat in last_latency_summary) / len(last_latency_summary)
+                                   if last_latency_summary else 0.0)
+                    self.redistribution_log.append((
+                        self.simulation_time,
+                        f"Latency-Aware Redistribution: sources {', '.join(last_selected_sources)} (avg latency {avg_latency:.2f} ms)"
+                    ))
+                else:
+                    self.redistribution_log.append((
+                        self.simulation_time,
+                        "Latency-Aware Redistribution: threshold satisfied"
+                    ))
+                return
+
+            eligible_switches = [s for s in switches_over if degrees[s.id] > 0]
+
+            if not eligible_switches:
+                break
+
+            eligible_switches.sort(
+                key=lambda s: (-(s.current_load - self.load_threshold), average_latency_for_switch(s))
+            )
+
+            top_k_switches = eligible_switches[:min(self.top_k, len(eligible_switches))]
+            sources_to_redistribute = [s.id for s in top_k_switches]
+
+            if not sources_to_redistribute:
+                break
+
+            latency_summary = []
+            for switch in top_k_switches:
+                best_neighbors = latency_neighbors_map.get(switch.id, [])
+                if not best_neighbors:
+                    continue
+                best_neighbor_id = best_neighbors[0]
+                neighbor_latency = next((lat for neighbor_id, lat in latency_map[switch.id]
+                                         if neighbor_id == best_neighbor_id), None)
+                if neighbor_latency is not None:
+                    latency_summary.append((switch.id, best_neighbor_id, neighbor_latency))
+
+            current_loads = {s.id: s.current_load for s in switches}
+
+            try:
+                loads_after = proportional_redistribute_sources_full(
+                    loads=current_loads.copy(),
+                    degrees=degrees,
+                    sources=sources_to_redistribute,
+                    neighbors_map=latency_neighbors_map,
+                    beta=1.0
+                )
+            except Exception as e:
+                print(f"[Error] Latency-aware redistribution failed: {e}")
+                return
+
+            for switch in switches:
+                if switch.id in loads_after:
+                    new_load = loads_after[switch.id]
+                    switch.current_load = new_load
+
+                    base_load = 0
+                    for neighbor_id in switch.connections:
+                        neighbor = self.components.get(neighbor_id)
+                        if neighbor:
+                            if neighbor.type == ComponentType.SERVER:
+                                base_load += 20
+                            elif neighbor.type == ComponentType.SWITCH:
+                                base_load += 5
+                            elif neighbor.type == ComponentType.SAN:
+                                base_load += 10
+
+                    switch.cumulative_request_load = max(0, new_load - base_load)
+
+                    switch.reliability = reliability_R(
+                        switch.operational_time,
+                        switch.current_load,
+                        switch.base_lambda,
+                        switch.alpha
+                    )
+
+                    switch.sleep_mode = False
+                    switch.calculate_power_consumption()
+
+            last_selected_sources = sources_to_redistribute
+            last_latency_summary = latency_summary
+
+        switches_still_over = [s for s in switches if s.current_load >= self.load_threshold]
+
+        for s in switches:
+            s.over_threshold = (s.current_load >= self.load_threshold)
+
+        if switches_still_over:
+            self.simulation_paused = True
+            self.show_failure_dialog(switches_still_over)
+
+    def apply_energy_aware_redistribution(self):
+        """Apply energy-aware load redistribution.
+        
+        Minimizes total power consumption while maintaining network functionality.
+        
+        Logic:
+        - For switches over threshold: redistribute load to neighbors
+        - Select redistribution strategy that minimizes total power consumption
+        - Can put switches to sleep if load < 10 (power -> 0, unavailable)
+        - Considers power efficiency: prefer high-capacity neighbors
+        """
+        switches = [c for c in self.components.values() if c.type == ComponentType.SWITCH]
+        
+        # Find switches over threshold
+        switches_over = [s for s in switches if s.current_load >= self.load_threshold]
+        
+        if not switches_over:
+            # Clear over_threshold flag for all if none are over
+            for s in switches:
+                s.over_threshold = False
+            return  # No redistribution needed
+        
+        # Build neighbors map from actual network connections
+        neighbors_map = {}
+        for switch in switches:
+            neighbors_map[switch.id] = [neighbor_id for neighbor_id in switch.connections 
+                                        if self.components.get(neighbor_id) and 
+                                        self.components[neighbor_id].type == ComponentType.SWITCH]
+        
+        # Build degrees dictionary (number of connected switches)
+        degrees = {s.id: len(neighbors_map[s.id]) for s in switches}
+        
+        # Check if ANY switch can actually redistribute (has neighbors)
+        any_can_redistribute = any(degrees[s.id] > 0 for s in switches)
+        
+        if not any_can_redistribute:
+            # No switches can redistribute - mark over-threshold
+            for s in switches_over:
+                s.over_threshold = True
+            self.simulation_paused = True
+            self.show_failure_dialog(switches_over)
+            return
+        
+        # Calculate total power before redistribution
+        power_before = sum(s.power_consumption for s in switches)
+        
+        # Try to redistribute (max 4 iterations)
+        iteration = 0
+        max_iterations = 4
+        
+        while iteration < max_iterations:
+            iteration += 1
+            
+            # Find current switches over threshold
+            switches_over = [s for s in switches if s.current_load >= self.load_threshold]
+            
+            if not switches_over:
+                # SUCCESS: All switches are now below threshold
+                for s in switches:
+                    s.over_threshold = False
+                
+                # Log energy savings
+                power_after = sum(s.power_consumption for s in switches)
+                savings = power_before - power_after
+                self.redistribution_log.append((
+                    self.simulation_time,
+                    f"Energy-Aware Redistribution: Saved {savings:.1f}W (before: {power_before:.1f}W, after: {power_after:.1f}W)"
+                ))
+                return  # No pause needed
+            
+            # Filter switches with neighbors that can redistribute
+            # Energy-aware: prefer switches consuming MORE power to reduce overall consumption
+            eligible_switches = [s for s in switches if degrees[s.id] > 0]
+            eligible_switches.sort(key=lambda s: s.power_consumption, reverse=True)  # Highest power first
+            
+            # Select top K switches with highest power consumption
+            top_k_switches = eligible_switches[:min(self.top_k, len(eligible_switches))]
+            sources_to_redistribute = [s.id for s in top_k_switches]
+            
+            if not sources_to_redistribute:
+                # No more switches can redistribute - break loop
+                break
+            
+            # Get current loads for redistribution algorithm
+            current_loads = {s.id: s.current_load for s in switches}
+            
+            # Call redistribution algorithm
+            try:
+                loads_after = proportional_redistribute_sources_full(
+                    loads=current_loads.copy(),
+                    degrees=degrees,
+                    sources=sources_to_redistribute,
+                    neighbors_map=neighbors_map,
+                    beta=1.0
+                )
+            except Exception as e:
+                print(f"[Error] Energy-aware redistribution failed: {e}")
+                return
+            
+            # Apply the redistributed loads to switches
+            for switch in switches:
+                if switch.id in loads_after:
+                    new_load = loads_after[switch.id]
+                    switch.current_load = new_load
+                    
+                    # Update cumulative_request_load to match the new load
+                    base_load = 0
+                    for neighbor_id in switch.connections:
+                        neighbor = self.components.get(neighbor_id)
+                        if neighbor:
+                            if neighbor.type == ComponentType.SERVER:
+                                base_load += 20
+                            elif neighbor.type == ComponentType.SWITCH:
+                                base_load += 5
+                            elif neighbor.type == ComponentType.SAN:
+                                base_load += 10
+                    
+                    switch.cumulative_request_load = max(0, new_load - base_load)
+                    
+                    # Recalculate reliability with new load
+                    switch.reliability = reliability_R(
+                        switch.operational_time,
+                        switch.current_load,
+                        switch.base_lambda,
+                        switch.alpha
+                    )
+                    
+                    # Recalculate power consumption with new load
+                    switch.calculate_power_consumption()
+                    
+                    # Try to sleep switches with very low load (< 10)
+                    if switch.current_load < 10 and switch.id not in sources_to_redistribute:
+                        switch.sleep_mode = True
+                        print(f"[DEBUG] Switch {switch.id} entering sleep mode (load: {switch.current_load:.1f})")
+                    else:
+                        switch.sleep_mode = False
+        
+        # After loop: check if all are below threshold
+        switches_still_over = [s for s in switches if s.current_load >= self.load_threshold]
+        
+        # Mark switches as over_threshold
+        for s in switches:
+            s.over_threshold = (s.current_load >= self.load_threshold)
+        
+        if switches_still_over:
+            # FAILURE: Still above threshold after 4 iterations - PAUSE and show failure dialog
+            self.simulation_paused = True
+            self.show_failure_dialog(switches_still_over)
+    
     def show_failure_dialog(self, switches_over):
         """Show failure dialog when redistribution is not possible or failed."""
         dialog = QMessageBox(self)
@@ -1495,6 +1846,10 @@ class NetworkSimulator(QMainWindow):
         # Get all switches
         switches = [c for c in self.components.values() if c.type == ComponentType.SWITCH]
         
+        # Calculate power for all switches
+        for switch in switches:
+            switch.calculate_power_consumption()
+        
         # Ensure table has the right number of rows
         if self.stats_table.rowCount() != len(switches):
             self.stats_table.blockSignals(True)
@@ -1509,21 +1864,21 @@ class NetworkSimulator(QMainWindow):
                 # Req/s: editable for user to pause and adjust
                 req_item = QTableWidgetItem(str(int(switch.incoming_requests)))
                 req_item.setFlags(req_item.flags() | Qt.ItemFlag.ItemIsEditable)
-                self.stats_table.setItem(row, 2, req_item)
+                self.stats_table.setItem(row, 3, req_item)
                 
                 # Lambda: editable
                 lambda_item = QTableWidgetItem(f"{switch.base_lambda:.2e}")
                 lambda_item.setFlags(lambda_item.flags() | Qt.ItemFlag.ItemIsEditable)
-                self.stats_table.setItem(row, 4, lambda_item)
+                self.stats_table.setItem(row, 5, lambda_item)
                 
                 # Alpha: editable
                 alpha_item = QTableWidgetItem(str(switch.alpha))
                 alpha_item.setFlags(alpha_item.flags() | Qt.ItemFlag.ItemIsEditable)
-                self.stats_table.setItem(row, 5, alpha_item)
+                self.stats_table.setItem(row, 6, alpha_item)
             
             self.stats_table.blockSignals(False)
         
-        # Update Load, Reliability, and Op.Time on every frame
+        # Update Load, Power, Reliability, and Op.Time on every frame
         for row, switch in enumerate(switches):
             # Load (update only) - just the numeric value
             load_text = f"{switch.current_load:.1f}"
@@ -1535,23 +1890,33 @@ class NetworkSimulator(QMainWindow):
             else:
                 load_item.setText(load_text)
             
+            # Power Consumption (update only) - Energy-aware feature
+            power_text = f"{switch.power_consumption:.1f}"
+            power_item = self.stats_table.item(row, 2)
+            if power_item is None:
+                power_item = QTableWidgetItem(power_text)
+                power_item.setFlags(power_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.stats_table.setItem(row, 2, power_item)
+            else:
+                power_item.setText(power_text)
+            
             # Reliability (update only) - AFTM-based reliability
             reliability_text = f"{switch.reliability:.4f}"
-            reliability_item = self.stats_table.item(row, 3)
+            reliability_item = self.stats_table.item(row, 4)
             if reliability_item is None:
                 reliability_item = QTableWidgetItem(reliability_text)
                 reliability_item.setFlags(reliability_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                self.stats_table.setItem(row, 3, reliability_item)
+                self.stats_table.setItem(row, 4, reliability_item)
             else:
                 reliability_item.setText(reliability_text)
             
             # Operational Time (update only)
             op_time_text = f"{switch.operational_time:.1f}s"
-            op_time_item = self.stats_table.item(row, 6)
+            op_time_item = self.stats_table.item(row, 7)
             if op_time_item is None:
                 op_time_item = QTableWidgetItem(op_time_text)
                 op_time_item.setFlags(op_time_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                self.stats_table.setItem(row, 6, op_time_item)
+                self.stats_table.setItem(row, 7, op_time_item)
             else:
                 op_time_item.setText(op_time_text)
         
@@ -1563,6 +1928,9 @@ class NetworkSimulator(QMainWindow):
                 for switch in switches:
                     if switch.id in self.load_history:
                         self.load_history[switch.id].append((self.simulation_time, switch.current_load))
+                    # Also log power consumption for energy-aware graphs
+                    if switch.id in self.power_history:
+                        self.power_history[switch.id].append((self.simulation_time, switch.power_consumption))
         
         # Update graphics for all switches to reflect color changes (over_threshold, load colors)
         for graphics_item in self.graphics_items.values():
@@ -1585,22 +1953,22 @@ class NetworkSimulator(QMainWindow):
             return
         
         try:
-            # Column 2: Req/s (incoming requests)
-            if column == 2:
+            # Column 3: Req/s (incoming requests)
+            if column == 3:
                 val = float(value_item.text())
                 if val < 0:
                     val = 0
                 comp.incoming_requests = val
             
-            # Column 4: Lambda (base failure rate)
-            elif column == 4:
+            # Column 5: Lambda (base failure rate)
+            elif column == 5:
                 val = float(value_item.text())
                 if val < 0:
                     val = 0
                 comp.base_lambda = val
             
-            # Column 5: Alpha (load exponent)
-            elif column == 5:
+            # Column 6: Alpha (load exponent)
+            elif column == 6:
                 val = float(value_item.text())
                 if val < 0:
                     val = 0
@@ -1614,8 +1982,12 @@ class NetworkSimulator(QMainWindow):
         # Recalculate loads and reliability immediately when user edits
         self.calculate_switch_loads(include_requests=self.simulation_running)
     
-    def generate_graph(self):
-        """Generate and display load vs time graph for all switches."""
+    def generate_graph(self, graph_type='load'):
+        """Generate and display graph (load or power) vs time for all switches.
+        
+        Args:
+            graph_type: 'load' for load vs time, 'power' for power vs time
+        """
         # Get all current switches
         all_switches = [c for c in self.components.values() if c.type == ComponentType.SWITCH]
         
@@ -1623,36 +1995,46 @@ class NetworkSimulator(QMainWindow):
             QMessageBox.warning(self, "No Data", "No switches in the network")
             return
         
-        # Check if we have any load history data
-        has_history = any(self.load_history.get(s.id, []) for s in all_switches)
+        # Choose history based on graph type
+        if graph_type == 'power':
+            history_data = self.power_history
+            y_label = 'Power (W)'
+            title = 'Switch Power Consumption vs Time'
+        else:  # load
+            history_data = self.load_history
+            y_label = 'Load'
+            title = 'Switch Load vs Time'
+        
+        # Check if we have any history data
+        has_history = any(history_data.get(s.id, []) for s in all_switches)
         
         if not has_history:
-            QMessageBox.warning(self, "No Data", "Run simulation first to generate graph")
+            QMessageBox.warning(self, "No Data", f"Run simulation first to generate {graph_type} graph")
             return
         
         # Create figure
         plt.figure(figsize=(12, 6))
         
-        # Plot load for each switch from history
+        # Plot data for each switch from history
         colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
         plotted = False
         
         for i, switch in enumerate(all_switches):
-            history = self.load_history.get(switch.id, [])
-            if history:  # Plot if there's history data
-                times = [t for t, _ in history]
-                loads = [l for _, l in history]
+            data = history_data.get(switch.id, [])
+            if data:  # Plot if there's history data
+                times = [t for t, _ in data]
+                values = [v for _, v in data]
                 color = colors[i % len(colors)]
-                plt.plot(times, loads, marker='o', label=switch.id, color=color, linewidth=2)
+                plt.plot(times, values, marker='o', label=switch.id, color=color, linewidth=2)
                 plotted = True
         
         if not plotted:
-            QMessageBox.warning(self, "No Data", "No load history recorded")
+            QMessageBox.warning(self, "No Data", f"No {graph_type} history recorded")
             return
         
         plt.xlabel('Time (steps)', fontsize=12)
-        plt.ylabel('Load', fontsize=12)
-        plt.title('Switch Load vs Time', fontsize=14, fontweight='bold')
+        plt.ylabel(y_label, fontsize=12)
+        plt.title(title, fontsize=14, fontweight='bold')
         plt.legend(loc='best')
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
@@ -1673,8 +2055,7 @@ class NetworkSimulator(QMainWindow):
     def save_configuration(self):
         """Save network configuration to JSON."""
         config = {
-            'components': [c.to_dict() for c in self.components.values()],
-            'load_balancing_strategy': self.load_balancer.strategy.value
+            'components': [c.to_dict() for c in self.components.values()]
         }
         
         try:
@@ -1720,7 +2101,8 @@ class NetworkSimulator(QMainWindow):
                     # Add graphics connections
                     if source.id in self.graphics_items and dest_id in self.graphics_items:
                         conn = GraphicsConnection(self.graphics_items[source.id], 
-                                                self.graphics_items[dest_id])
+                                                self.graphics_items[dest_id],
+                                                self.latency_conversion_factor)
                         self.connections_graphics.append(conn)
                         self.scene.addItem(conn)
             
